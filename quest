@@ -1460,9 +1460,9 @@ case "${1:-status}" in
     echo "Player:  $PLAYER_NAME"
     echo "Checking lesson $(level_number "$q"): $q — $(title "$q")"
     echo "Validating from:"
-    echo "  • session log  ($LOG)"
-    echo "  • shell history (~/.bash_history / ~/.zsh_history)"
-    echo "  • lab files     ($LAB)"
+    echo "  • your session log  ($LOG)"
+    echo "  • lab files         ($LAB)"
+    echo "  • shell history only if your session log is empty"
     echo
 
     # Replay of an already-cleared level: never undo later progress.
