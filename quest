@@ -132,6 +132,10 @@ login_user() {
     return 1
   }
   touch "${PLAYER_DIR}/.started"
+  # Mark the session log so validation does not fall back to global history.
+  if [[ ! -s "$LOG" ]]; then
+    printf '# quest-session %s\n' "$PLAYER_NAME" > "$LOG"
+  fi
   if [[ "$is_new" == "1" ]]; then
     echo "New player: $PLAYER_NAME"
   else
@@ -344,32 +348,40 @@ jump_to_level() {
 
 evidence() {
   local pat="$1"
+  # Prefer THIS player's session.log so other users' shell history cannot
+  # accidentally clear a level. Fall back to history only if the player log
+  # has no lines yet (logger not sourced).
   QUEST_LOG="$LOG" QUEST_HOME_DIR="$HOME" QUEST_PAT="$pat" python3 <<'PY'
 import os, re, sys, warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 raw_pat = os.environ["QUEST_PAT"].lower()
-# Convert common bash/POSIX class syntax into Python regex.
 pat = raw_pat.replace("[[:space:]]", r"\s").replace("[[:blank:]]", r"[ \t]")
-# If caller passed a plain phrase like "man ls", treat spaces loosely.
 if not any(ch in pat for ch in r".*+?[](){}\^$|\\"):
     pat = r"\b" + r"\s+".join(re.escape(p) for p in pat.split()) + r"\b"
-home = os.environ["QUEST_HOME_DIR"]
-paths = [
-    os.environ["QUEST_LOG"],
-    os.path.join(home, ".quest-mastery", "session.log"),  # legacy hook path
-    os.path.join(home, ".zsh_history"),
-    os.path.join(home, ".bash_history"),
-]
-lines = []
-for path in paths:
+
+def read_lines(path, limit=500):
     try:
         data = open(path, "rb").read().decode("utf-8", "ignore")
     except OSError:
-        continue
-    for raw in data.splitlines()[-500:]:
+        return []
+    out = []
+    for raw in data.splitlines()[-limit:]:
         m = re.match(r"^:\s*\d+:\d+;(.*)$", raw)
-        lines.append(m.group(1) if m else raw)
-text = "\n".join(lines).lower()
+        out.append(m.group(1) if m else raw)
+    return out
+
+home = os.environ["QUEST_HOME_DIR"]
+player_log = os.environ["QUEST_LOG"]
+legacy_log = os.path.join(home, ".quest-mastery", "session.log")
+player_lines = read_lines(player_log) + read_lines(legacy_log)
+# If the player has logged anything, only trust player logs (not global history).
+if any(x.strip() for x in player_lines):
+    text = "\n".join(player_lines).lower()
+else:
+    hist = read_lines(os.path.join(home, ".zsh_history")) + read_lines(
+        os.path.join(home, ".bash_history")
+    )
+    text = "\n".join(hist).lower()
 sys.exit(0 if re.search(pat, text, re.M) else 1)
 PY
 }
