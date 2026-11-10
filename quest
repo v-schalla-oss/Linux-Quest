@@ -1440,8 +1440,14 @@ case "${1:-status}" in
     require_user
     q="$(active_lesson)"
     campaign="$(get_quest)"
+    # Flush bash history file if possible (best-effort; helps validation)
+    history -a 2>/dev/null || true
     echo "Player:  $PLAYER_NAME"
     echo "Checking lesson $(level_number "$q"): $q — $(title "$q")"
+    echo "Validating from:"
+    echo "  • session log  ($LOG)"
+    echo "  • shell history (~/.bash_history / ~/.zsh_history)"
+    echo "  • lab files     ($LAB)"
     echo
 
     # Replay of an already-cleared level: never undo later progress.
@@ -1478,6 +1484,8 @@ case "${1:-status}" in
     fi
 
     if verify "$q"; then
+      echo "Validation passed."
+      echo
       if [[ "$q" == "s1" ]]; then
         echo "Detected: whoami, pwd, and clear. Great work."
         echo
@@ -1504,9 +1512,7 @@ case "${1:-status}" in
         next_title="level $(level_number "$n") — $(title "$n")"
         celebrate "$PLAYER_NAME" "$cleared_title" "$next_title"
         if ask_continue; then
-          echo
-          echo "Great — continuing to the next level..."
-          echo
+          clear 2>/dev/null || printf '\033c'
           show_status
         else
           echo
@@ -1521,6 +1527,7 @@ case "${1:-status}" in
       fi
     else
       echo "NOT YET — could not verify this lesson for $PLAYER_NAME."
+      echo "Checked: session log + shell history + lab files."
       echo
       if [[ "$q" == "s1" ]]; then
         echo "Level 1 checklist:"
