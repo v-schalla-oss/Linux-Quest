@@ -19,7 +19,8 @@ show_command_menu() {
   hr
   printf "%-22s %s\n" "Command" "What it does"
   hr
-  printf "%-22s %s\n" "quest login Name" "create/switch player"
+  printf "%-22s %s\n" "quest login Name" "create OR switch player"
+  printf "%-22s %s\n" "quest new Name" "same as login (create/switch)"
   printf "%-22s %s\n" "quest" "show current lesson for that player"
   printf "%-22s %s\n" "quest <N>" "jump to unlocked level N (keeps progress)"
   printf "%-22s %s\n" "quest levels" "list all levels + cleared status"
@@ -41,8 +42,10 @@ n=sys.argv[1].strip()
 if not n:
     raise SystemExit(1)
 slug=re.sub(r'[^A-Za-z0-9._-]+', '-', n).strip('-').lower()
+if not slug:
+    raise SystemExit(1)
 print(n)
-print(slug or 'player')
+print(slug)
 " "$1"
 }
 
@@ -89,44 +92,61 @@ save_current_user() {
 }
 
 login_user() {
-  local raw="$1" pair display slug
+  local raw="$1" pair display slug prev
   # If someone types the full command as their name, recover the real name.
   # Example mistake: "quest login sushanth" → "sushanth"
-  raw="$(printf '%s' "$raw" | sed -E 's/^[[:space:]]*quest[[:space:]]+login[[:space:]]+//I; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+  raw="$(printf '%s' "$raw" | sed -E 's/^[[:space:]]*quest[[:space:]]+(login|new|switch)[[:space:]]+//I; s/^[[:space:]]+//; s/[[:space:]]+$//')"
   if [[ -z "${raw// }" ]]; then
     echo "Name cannot be empty."
-    echo "Type ONLY your name, example: sushanth"
-    echo "Not: quest login sushanth"
+    echo
+    echo "Create / switch player with:"
+    echo "  quest login YourName"
+    echo "Example:"
+    echo "  quest login alex"
     return 1
   fi
-  if [[ "$raw" == "quest" || "$raw" == "login" ]]; then
+  if [[ "$raw" == "quest" || "$raw" == "login" || "$raw" == "new" || "$raw" == "switch" ]]; then
     echo "That looks like a command, not a name."
-    echo "Type ONLY your name, example: sushanth"
+    echo "Example:  quest login alex"
     return 1
   fi
   pair="$(sanitize_name "$raw")" || {
-    echo "Please enter a valid name (letters/numbers)."
+    echo "Please enter a valid name (use letters or numbers)."
+    echo "Example:  quest login alex"
     return 1
   }
   display="$(printf '%s\n' "$pair" | sed -n '1p')"
   slug="$(printf '%s\n' "$pair" | sed -n '2p')"
+  prev=""
+  if [[ -f "$CURRENT_FILE" ]]; then
+    prev="$(sed -n '1p' "$CURRENT_FILE")"
+  fi
   save_current_user "$display" "$slug"
   local player_dir="${USERS_DIR}/${slug}"
   local is_new=0
   if [[ ! -f "${player_dir}/.started" ]]; then
     is_new=1
   fi
-  load_user
+  load_user || {
+    echo "Could not create player files for: $display"
+    return 1
+  }
   touch "${PLAYER_DIR}/.started"
   hr
   if [[ "$is_new" == "1" ]]; then
-    echo "Welcome, $PLAYER_NAME!"
+    echo "NEW PLAYER CREATED: $PLAYER_NAME"
     echo "Your progress will be saved under this name."
   else
-    echo "Welcome back, $PLAYER_NAME!"
+    echo "Switched to existing player: $PLAYER_NAME"
+  fi
+  if [[ -n "$prev" && "$prev" != "$PLAYER_NAME" ]]; then
+    echo "(Previously active: $prev — their progress is still saved.)"
   fi
   echo "Player folder: $LAB"
   echo "Progress file: $PROG"
+  echo
+  echo "To make another user later:"
+  echo "  quest login OtherName"
   hr
 }
 
@@ -1314,7 +1334,9 @@ cmd_help() {
 DETAILS
 
   quest login YourName
-      Create or switch to a player. Progress is saved per name.
+  quest new YourName
+      Create a new player OR switch to an existing one.
+      Progress is saved per name and is never mixed.
 
   quest
       Show your current campaign lesson (asks for name if needed).
@@ -1357,22 +1379,41 @@ EOF
 }
 
 case "${1:-status}" in
-  login)
+  login|new|switch)
     shift
     show_command_menu
     if [[ $# -lt 1 ]]; then
-      ask_login_interactive
+      echo "Create or switch to a player:"
+      echo "  quest login YourName"
+      echo "  quest new YourName"
+      echo
+      echo "Examples:"
+      echo "  quest login alex"
+      echo "  quest login sara"
+      echo
+      if [[ -t 0 ]]; then
+        ask_login_interactive
+      else
+        echo "This terminal is not interactive."
+        echo "Run:  quest login YourName"
+        exit 1
+      fi
     else
-      login_user "$*"
+      if ! login_user "$*"; then
+        exit 1
+      fi
     fi
     show_status
     ;;
   logout)
     rm -f "$CURRENT_FILE"
     show_command_menu
-    echo "Logged out."
-    echo "Next: cd ~/quest-lab"
-    echo "Then: quest login YourName"
+    echo "Logged out. No player is active now."
+    echo
+    echo "Create a new player or switch back with:"
+    echo "  quest login YourName"
+    echo "Example:"
+    echo "  quest login alex"
     ;;
   who|whoami-player)
     show_command_menu
