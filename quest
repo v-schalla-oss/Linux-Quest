@@ -132,22 +132,15 @@ login_user() {
     return 1
   }
   touch "${PLAYER_DIR}/.started"
-  hr
   if [[ "$is_new" == "1" ]]; then
-    echo "NEW PLAYER CREATED: $PLAYER_NAME"
-    echo "Your progress will be saved under this name."
+    echo "New player: $PLAYER_NAME"
   else
-    echo "Switched to existing player: $PLAYER_NAME"
+    echo "Switched to: $PLAYER_NAME"
   fi
   if [[ -n "$prev" && "$prev" != "$PLAYER_NAME" ]]; then
-    echo "(Previously active: $prev — their progress is still saved.)"
+    echo "(Saved progress for $prev is still there.)"
   fi
-  echo "Player folder: $LAB"
-  echo "Progress file: $PROG"
   echo
-  echo "To make another user later:"
-  echo "  quest login OtherName"
-  hr
 }
 
 ask_login_interactive() {
@@ -1211,6 +1204,7 @@ next_of() {
 }
 
 ensure_logger_hint() {
+  # Install logger quietly; show the source tip at most once.
   if ! grep -q 'quest-mastery-hook' "$HOME/.bashrc" 2>/dev/null; then
     cat >> "$HOME/.bashrc" <<'EOF'
 
@@ -1237,10 +1231,11 @@ PROMPT_COMMAND="_quest_log_last_command${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 EOF
   fi
   if [[ "${PROMPT_COMMAND:-}" != *_quest_log_last_command* ]]; then
-    echo "FIRST-TIME SETUP (important):"
-    echo "  Run once so quest can see your commands:"
-    echo "    source ~/.bashrc"
-    echo
+    if [[ ! -f "$QH/.bashrc_tip_shown" ]]; then
+      echo "Tip (once): run  source ~/.bashrc  so quest can track your commands."
+      echo
+      touch "$QH/.bashrc_tip_shown"
+    fi
   fi
 }
 
@@ -1295,36 +1290,25 @@ show_status() {
   cnum="$(level_number "$campaign")"
   anum="$(level_number "$active")"
   ensure_logger_hint
-  show_command_menu
+
+  # Challenge-first view (full command list lives in: quest help)
   hr
-  echo "LINUX COMMAND MASTERY"
-  hr
-  echo "Player:    $PLAYER_NAME"
-  echo "Cleared:   $(done_count)/${#ORDER[@]} levels"
-  if [[ "$campaign" == "DONE" ]]; then
-    echo "Campaign:  COMPLETE (all levels unlocked)"
+  if [[ "$campaign" == "DONE" && -z "$focus" ]]; then
+    echo "Player: $PLAYER_NAME  |  COMPLETE  $(done_count)/${#ORDER[@]}"
   else
-    echo "Campaign:  level $cnum/${#ORDER[@]} — $(title "$campaign")"
+    echo "Player: $PLAYER_NAME  |  Level $anum/${#ORDER[@]}  |  Cleared $(done_count)/${#ORDER[@]}"
   fi
   if [[ -n "$focus" && "$focus" != "$campaign" ]]; then
-    echo "Viewing:   level $anum — $(title "$focus")  (jump; progress kept)"
+    echo "Viewing replay of level $anum (campaign progress kept)"
   fi
-  echo "Lab:       $LAB"
-  echo
-  echo "How to play:"
-  echo "  1) Read the STORY and GOAL"
-  echo "  2) Use the listed commands your own way"
-  echo "  3) Run:  quest check"
-  echo "  Jump to a level:    quest <N>   (example: quest 5)"
-  echo "  Level map:          quest levels"
-  echo
+  echo "Lab: $LAB"
   hr
-  echo "LESSON $anum: $(title "$active")"
+  echo "CHALLENGE $anum: $(title "$active")"
   hr
   teach "$active"
   hr
-  echo "Go to your lab first:"
-  echo "  cd $LAB"
+  echo "When ready:  quest check"
+  echo "Help:        quest help"
   hr
 }
 
@@ -1381,15 +1365,10 @@ EOF
 case "${1:-status}" in
   login|new|switch)
     shift
-    show_command_menu
     if [[ $# -lt 1 ]]; then
       echo "Create or switch to a player:"
       echo "  quest login YourName"
-      echo "  quest new YourName"
-      echo
-      echo "Examples:"
-      echo "  quest login alex"
-      echo "  quest login sara"
+      echo "Examples:  quest login alex"
       echo
       if [[ -t 0 ]]; then
         ask_login_interactive
@@ -1407,16 +1386,10 @@ case "${1:-status}" in
     ;;
   logout)
     rm -f "$CURRENT_FILE"
-    show_command_menu
     echo "Logged out. No player is active now."
-    echo
-    echo "Create a new player or switch back with:"
-    echo "  quest login YourName"
-    echo "Example:"
-    echo "  quest login alex"
+    echo "Next:  quest login YourName"
     ;;
   who|whoami-player)
-    show_command_menu
     if load_user; then
       echo "Player: $PLAYER_NAME"
       echo "Lab:    $LAB"
@@ -1428,14 +1401,9 @@ case "${1:-status}" in
     fi
     ;;
   users|players)
-    show_command_menu
     list_users
     ;;
   status|"")
-    # Always show the command structure when entering quest
-    if ! load_user; then
-      show_command_menu
-    fi
     require_user
     show_status
     ;;
