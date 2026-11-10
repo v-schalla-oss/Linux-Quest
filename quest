@@ -372,12 +372,15 @@ def read_lines(path, limit=500):
 
 home = os.environ["QUEST_HOME_DIR"]
 player_log = os.environ["QUEST_LOG"]
-legacy_log = os.path.join(home, ".quest-mastery", "session.log")
-player_lines = read_lines(player_log) + read_lines(legacy_log)
-# If the player has logged anything, only trust player logs (not global history).
-if any(x.strip() for x in player_lines):
+# Only THIS player's session.log — never the shared legacy log / other users.
+player_lines = [
+    ln for ln in read_lines(player_log)
+    if ln.strip() and not ln.strip().startswith("#")
+]
+if player_lines:
     text = "\n".join(player_lines).lower()
 else:
+    # Logger not active yet: last-resort fallback to shell history.
     hist = read_lines(os.path.join(home, ".zsh_history")) + read_lines(
         os.path.join(home, ".bash_history")
     )
