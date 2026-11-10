@@ -1,0 +1,14 @@
+# Player runtime state (never commit)
+.quest-mastery/
+quest-lab/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Archives
+*.zip
+*.tgz
+*.tar.gz

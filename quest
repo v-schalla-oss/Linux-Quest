@@ -1,0 +1,1639 @@
+#!/usr/bin/env bash
+# quest — beginner-friendly Linux Command Mastery guide (terminal)
+# Progress is tracked per named player.
+set -euo pipefail
+export LC_ALL=C LANG=C
+
+QH="${HOME}/.quest-mastery"
+USERS_DIR="${QH}/users"
+CURRENT_FILE="${QH}/current_user"
+ROOT_LAB="${HOME}/quest-lab"
+
+mkdir -p "$QH" "$USERS_DIR" "$ROOT_LAB"
+
+hr() { printf '%s\n' "----------------------------------------"; }
+
+show_command_menu() {
+  hr
+  echo "QUEST COMMANDS"
+  hr
+  printf "%-22s %s\n" "Command" "What it does"
+  hr
+  printf "%-22s %s\n" "quest login Name" "create/switch player"
+  printf "%-22s %s\n" "quest" "show current lesson for that player"
+  printf "%-22s %s\n" "quest <N>" "jump to unlocked level N (keeps progress)"
+  printf "%-22s %s\n" "quest levels" "list all levels + cleared status"
+  printf "%-22s %s\n" "quest check" "verify and advance"
+  printf "%-22s %s\n" "quest who" "who is logged in"
+  printf "%-22s %s\n" "quest users" "list all players + progress"
+  printf "%-22s %s\n" "quest logout" "log out"
+  printf "%-22s %s\n" "quest reset" "reset only current player"
+  printf "%-22s %s\n" "quest help" "more help"
+  hr
+  echo
+}
+
+sanitize_name() {
+  # Keep letters, numbers, space, dash, underscore → slug
+  python3 -c "
+import re,sys
+n=sys.argv[1].strip()
+if not n:
+    raise SystemExit(1)
+slug=re.sub(r'[^A-Za-z0-9._-]+', '-', n).strip('-').lower()
+print(n)
+print(slug or 'player')
+" "$1"
+}
+
+# If the shell is still inside a deleted folder (common after reset),
+# getcwd fails with "cannot access parent directories". Heal by cd'ing to lab.
+heal_cwd() {
+  local target="${1:-$HOME}"
+  if ! pwd >/dev/null 2>&1; then
+    mkdir -p "$target"
+    cd "$target" 2>/dev/null || cd "$HOME" || true
+    echo "Note: your terminal was in a deleted folder."
+    echo "Fixed. You are now in: $(pwd 2>/dev/null || echo "$target")"
+    echo "Next time, after a reset, run: cd $target"
+    echo
+  fi
+}
+
+load_user() {
+  local display slug
+  if [[ ! -f "$CURRENT_FILE" ]]; then
+    return 1
+  fi
+  display="$(sed -n '1p' "$CURRENT_FILE")"
+  slug="$(sed -n '2p' "$CURRENT_FILE")"
+  [[ -n "$display" && -n "$slug" ]] || return 1
+  PLAYER_NAME="$display"
+  PLAYER_SLUG="$slug"
+  PLAYER_DIR="${USERS_DIR}/${PLAYER_SLUG}"
+  PROG="${PLAYER_DIR}/progress.json"
+  LOG="${PLAYER_DIR}/session.log"
+  LAB="${ROOT_LAB}/${PLAYER_SLUG}"
+  mkdir -p "$PLAYER_DIR" "$LAB"
+  touch "$LOG"
+  if [[ ! -f "$PROG" ]]; then
+    printf '%s\n' '{"quest":"s1","done":[],"boss":[],"name":"'"$PLAYER_NAME"'"}' > "$PROG"
+  fi
+  heal_cwd "$LAB"
+  return 0
+}
+
+save_current_user() {
+  local display="$1" slug="$2"
+  printf '%s\n%s\n' "$display" "$slug" > "$CURRENT_FILE"
+}
+
+login_user() {
+  local raw="$1" pair display slug
+  # If someone types the full command as their name, recover the real name.
+  # Example mistake: "quest login sushanth" → "sushanth"
+  raw="$(printf '%s' "$raw" | sed -E 's/^[[:space:]]*quest[[:space:]]+login[[:space:]]+//I; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+  if [[ -z "${raw// }" ]]; then
+    echo "Name cannot be empty."
+    echo "Type ONLY your name, example: sushanth"
+    echo "Not: quest login sushanth"
+    return 1
+  fi
+  if [[ "$raw" == "quest" || "$raw" == "login" ]]; then
+    echo "That looks like a command, not a name."
+    echo "Type ONLY your name, example: sushanth"
+    return 1
+  fi
+  pair="$(sanitize_name "$raw")" || {
+    echo "Please enter a valid name (letters/numbers)."
+    return 1
+  }
+  display="$(printf '%s\n' "$pair" | sed -n '1p')"
+  slug="$(printf '%s\n' "$pair" | sed -n '2p')"
+  save_current_user "$display" "$slug"
+  local player_dir="${USERS_DIR}/${slug}"
+  local is_new=0
+  if [[ ! -f "${player_dir}/.started" ]]; then
+    is_new=1
+  fi
+  load_user
+  touch "${PLAYER_DIR}/.started"
+  hr
+  if [[ "$is_new" == "1" ]]; then
+    echo "Welcome, $PLAYER_NAME!"
+    echo "Your progress will be saved under this name."
+  else
+    echo "Welcome back, $PLAYER_NAME!"
+  fi
+  echo "Player folder: $LAB"
+  echo "Progress file: $PROG"
+  hr
+}
+
+ask_login_interactive() {
+  echo
+  hr
+  echo "LINUX COMMAND MASTERY — LOGIN"
+  hr
+  echo "You are in the quest lab."
+  echo "First step: enter your name so progress is saved for YOU."
+  echo
+  echo "Type ONLY your name."
+  echo "  Correct:   sushanth"
+  echo "  Wrong:     quest login sushanth"
+  echo
+  if [[ ! -t 0 ]]; then
+    echo "This terminal is not interactive."
+    echo "Log in with:  quest login YourName"
+    exit 1
+  fi
+  local name
+  while true; do
+    printf "Your name: "
+    IFS= read -r name || true
+    if login_user "$name"; then
+      break
+    fi
+  done
+}
+
+require_user() {
+  if load_user; then
+    return 0
+  fi
+  ask_login_interactive
+}
+
+get_quest() {
+  python3 -c "import json;print(json.load(open(r'$PROG'))['quest'])"
+}
+set_quest() {
+  python3 -c "import json;p=json.load(open(r'$PROG'));p['quest']='$1';p['name']='$PLAYER_NAME';json.dump(p,open(r'$PROG','w'))"
+}
+get_focus() {
+  python3 -c "import json;print(json.load(open(r'$PROG')).get('focus') or '')"
+}
+set_focus() {
+  local id="${1:-}"
+  QUEST_FOCUS_ID="$id" QUEST_PROG="$PROG" QUEST_PNAME="$PLAYER_NAME" python3 <<'PY'
+import json, os
+p = json.load(open(os.environ["QUEST_PROG"]))
+fid = os.environ.get("QUEST_FOCUS_ID", "")
+if fid:
+    p["focus"] = fid
+else:
+    p.pop("focus", None)
+p["name"] = os.environ["QUEST_PNAME"]
+json.dump(p, open(os.environ["QUEST_PROG"], "w"))
+PY
+}
+clear_focus() { set_focus ""; }
+
+# Lesson currently shown/checked: focus (jump) if set, else campaign quest.
+active_lesson() {
+  local f
+  f="$(get_focus)"
+  if [[ -n "$f" ]]; then
+    printf '%s\n' "$f"
+  else
+    get_quest
+  fi
+}
+
+is_done() {
+  local id="$1"
+  QUEST_ID="$id" QUEST_PROG="$PROG" python3 <<'PY'
+import json, os, sys
+p = json.load(open(os.environ["QUEST_PROG"]))
+sys.exit(0 if os.environ["QUEST_ID"] in p.get("done", []) else 1)
+PY
+}
+
+mark_done() {
+  python3 -c "import json;p=json.load(open(r'$PROG'));d=p.setdefault('done',[]);
+d.append('$1') if '$1' not in d else None;p['name']='$PLAYER_NAME';json.dump(p,open(r'$PROG','w'))"
+}
+done_count() {
+  python3 -c "import json;print(len(json.load(open(r'$PROG')).get('done',[])))"
+}
+
+# 1-based index for a quest id (0 if unknown / DONE)
+level_number() {
+  local id="$1" i=0
+  [[ "$id" == "DONE" ]] && { echo "${#ORDER[@]}"; return; }
+  for x in "${ORDER[@]}"; do
+    i=$((i + 1))
+    if [[ "$x" == "$id" ]]; then
+      echo "$i"
+      return 0
+    fi
+  done
+  echo 0
+}
+
+id_at_level() {
+  local n="$1"
+  if [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#ORDER[@]} )); then
+    echo "${ORDER[$((n - 1))]}"
+    return 0
+  fi
+  return 1
+}
+
+# Highest unlocked level number: campaign position (or all if DONE)
+max_unlocked_level() {
+  local q idx
+  q="$(get_quest)"
+  if [[ "$q" == "DONE" ]]; then
+    echo "${#ORDER[@]}"
+    return
+  fi
+  idx="$(level_number "$q")"
+  if [[ "$idx" -lt 1 ]]; then
+    echo 1
+  else
+    echo "$idx"
+  fi
+}
+
+is_level_unlocked() {
+  local n="$1" max
+  max="$(max_unlocked_level)"
+  (( n >= 1 && n <= max ))
+}
+
+list_levels() {
+  local i=0 id q focus max st
+  q="$(get_quest)"
+  focus="$(get_focus)"
+  max="$(max_unlocked_level)"
+  hr
+  echo "LEVEL MAP — $PLAYER_NAME"
+  hr
+  printf "%-4s %-8s %-22s %s\n" "#" "ID" "Title" "Status"
+  hr
+  for id in "${ORDER[@]}"; do
+    i=$((i + 1))
+    st="locked"
+    if is_done "$id"; then
+      st="cleared"
+    elif [[ "$id" == "$q" ]]; then
+      st="current"
+    elif (( i <= max )); then
+      st="unlocked"
+    fi
+    if [[ -n "$focus" && "$id" == "$focus" ]]; then
+      st="$st (viewing)"
+    fi
+    printf "%-4s %-8s %-22s %s\n" "$i" "$id" "$(title "$id")" "$st"
+  done
+  hr
+  echo "Cleared: $(done_count)/${#ORDER[@]}"
+  if [[ "$q" == "DONE" ]]; then
+    echo "Campaign: COMPLETE"
+  else
+    echo "Campaign: level $(level_number "$q") — $(title "$q")"
+  fi
+  echo
+  echo "Jump without losing progress (N = any unlocked level number):"
+  echo "  quest <N>     example: quest 5"
+  echo "Return to campaign tip:"
+  echo "  quest"
+}
+
+jump_to_level() {
+  local n="$1" id max
+  if [[ ! "$n" =~ ^[0-9]+$ ]]; then
+    echo "Usage: quest <N>     example: quest 5"
+    echo "  or:  quest go <N>"
+    return 1
+  fi
+  if ! id="$(id_at_level "$n")"; then
+    echo "Level $n does not exist. Valid: 1-${#ORDER[@]}"
+    return 1
+  fi
+  max="$(max_unlocked_level)"
+  if ! is_level_unlocked "$n"; then
+    echo "Level $n is locked."
+    echo "You have unlocked up to level $max."
+    echo "Clear more lessons to open further levels."
+    return 1
+  fi
+  set_focus "$id"
+  echo "Jumped to level $n — $(title "$id")"
+  echo "Your cleared progress is safe ($(done_count)/${#ORDER[@]} kept)."
+  if is_done "$id"; then
+    echo "Note: you already cleared this level (replay mode)."
+  fi
+  echo
+  show_status
+}
+
+evidence() {
+  local pat="$1"
+  QUEST_LOG="$LOG" QUEST_HOME_DIR="$HOME" QUEST_PAT="$pat" python3 <<'PY'
+import os, re, sys, warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+raw_pat = os.environ["QUEST_PAT"].lower()
+# Convert common bash/POSIX class syntax into Python regex.
+pat = raw_pat.replace("[[:space:]]", r"\s").replace("[[:blank:]]", r"[ \t]")
+# If caller passed a plain phrase like "man ls", treat spaces loosely.
+if not any(ch in pat for ch in r".*+?[](){}\^$|\\"):
+    pat = r"\b" + r"\s+".join(re.escape(p) for p in pat.split()) + r"\b"
+home = os.environ["QUEST_HOME_DIR"]
+paths = [
+    os.environ["QUEST_LOG"],
+    os.path.join(home, ".quest-mastery", "session.log"),  # legacy hook path
+    os.path.join(home, ".zsh_history"),
+    os.path.join(home, ".bash_history"),
+]
+lines = []
+for path in paths:
+    try:
+        data = open(path, "rb").read().decode("utf-8", "ignore")
+    except OSError:
+        continue
+    for raw in data.splitlines()[-500:]:
+        m = re.match(r"^:\s*\d+:\d+;(.*)$", raw)
+        lines.append(m.group(1) if m else raw)
+text = "\n".join(lines).lower()
+sys.exit(0 if re.search(pat, text, re.M) else 1)
+PY
+}
+
+ORDER=(s1 s2 s3 s4 boss1 w1 w2 w3 w4 boss2 t1 t2 t3 t4 boss3 h1 h2 h3 h4 boss4 e1 e2 e3 boss5 k1 k2 k3 k4 boss6)
+
+title() {
+  case "$1" in
+    s1) echo "Identity Check";;
+    s2) echo "Manual Access";;
+    s3) echo "First Trail";;
+    s4) echo "Sight Upgrade";;
+    boss1) echo "Zone 1 Boss";;
+    w1) echo "Raise Walls";;
+    w2) echo "Touch Craft";;
+    w3) echo "Relocate & Clone";;
+    w4) echo "Clean Cut";;
+    boss2) echo "Zone 2 Boss";;
+    t1) echo "Peek Ends";;
+    t2) echo "Redirect Forge";;
+    t3) echo "Pipeworks";;
+    t4) echo "Expansion Magic";;
+    boss3) echo "Zone 3 Boss";;
+    h1) echo "File Bloodhound";;
+    h2) echo "Text Bloodhound";;
+    h3) echo "Diff Mirror";;
+    h4) echo "Disk & History";;
+    boss4) echo "Zone 4 Boss";;
+    e1) echo "Process Census";;
+    e2) echo "Soft Then Hard";;
+    e3) echo "Jobs bg/fg";;
+    boss5) echo "Zone 5 Boss";;
+    k1) echo "Bundle & Crush";;
+    k2) echo "Terminal Quill";;
+    k3) echo "Shortcuts";;
+    k4) echo "Keys to the Keep";;
+    boss6) echo "Final Boss";;
+    DONE) echo "Command Master";;
+    *) echo "$1";;
+  esac
+}
+
+teach() {
+  case "$1" in
+    s1)
+      cat <<EOF
+STORY
+  You wake up in a strange terminal. Before exploring, you need to
+  know who you are, where you stand, and how to clear the fog.
+
+GOAL
+  Prove your identity, print your location, and clear the screen.
+
+COMMANDS TO USE
+  whoami   → reveals your username
+  pwd      → prints your current path
+  clear    → wipes the screen (Ctrl+L also works visually)
+
+HOW
+  Run each command on its own line. For clear, prefer typing "clear".
+  Ctrl+L often is NOT saved in history — if quest cannot see it, run:
+    quest log clear
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    s2)
+      cat <<EOF
+STORY
+  An old librarian points at a dusty shelf labeled "manuals".
+  Every command has a book. Your job is to open two of them
+  and learn how to leave without getting stuck.
+
+GOAL
+  Open manual pages and exit them safely.
+
+COMMANDS TO USE
+  man <name>  → opens the manual for a command
+  q           → quits the pager and returns to your prompt
+
+HOW
+  Try opening the manual for a common tool (like ls), read a bit,
+  press q, then open the manual for man itself. Spacebar scrolls.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    s3)
+      cat <<EOF
+STORY
+  A trail splits into a hidden camp. You must dig a nested path —
+  not one lonely tent, but a camp inside a shore (parent/child).
+
+GOAL
+  Create a nested folder, step into it, confirm where you are,
+  then return to your lab.
+
+COMMANDS TO USE
+  mkdir -p   → make nested folders in one go
+  cd         → move into a folder
+  pwd        → show your current path
+
+HOW
+  From your lab (~/quest-lab/$PLAYER_SLUG), build any nested path
+  (examples: shore/alpha, trail/camp, lab/inner). Enter it, check
+  pwd, then cd back. One flat folder alone is not enough.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    s4)
+      cat <<EOF
+STORY
+  Morning mist lifts over your camp. Some things hide in plain
+  sight — especially files that start with a dot.
+
+GOAL
+  Learn three ways of looking: simple, all (including hidden),
+  and detailed.
+
+COMMANDS TO USE
+  ls       → list visible names
+  ls -a    → include hidden files
+  ls -la   → long details + hidden
+
+HOW
+  From your lab, run each listing style separately (not chained
+  with |). Notice what new names appear with -a, and what
+  permissions/sizes appear with -la.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    boss1)
+      cat <<EOF
+STORY
+  The Zone 1 gatekeeper blocks the path. "Show me who you are,
+  where you stand, and what this place contains."
+
+GOAL
+  Combine your Zone 1 skills in one short ritual.
+
+COMMANDS TO USE
+  ls -la   → inspect the lab in detail
+  whoami   → state your name
+  pwd      → state your location
+
+HOW
+  Stand in your lab and use those three skills. No new tricks —
+  just prove you remember the basics.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    w1)
+      cat <<EOF
+STORY
+  Builders raise walls for a deep workshop — floor under floor,
+  room under room. Shallow shelters will not survive the storm.
+
+GOAL
+  Create a deep nested folder chain (at least 4 levels).
+
+COMMANDS TO USE
+  mkdir -p   → create many nested folders at once
+
+HOW
+  From your lab, invent any deep path you like
+  (workshop/a/b/c, lab1/office/desk/computer, tower/floor/room/chest).
+  Depth matters more than the names.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    w2)
+      cat <<EOF
+STORY
+  Empty pages appear on the table. Touch them and they become real
+  files — blank, waiting for stories.
+
+GOAL
+  Create files using touch (any names you choose).
+
+COMMANDS TO USE
+  touch   → create empty files (or refresh timestamps)
+  ls      → confirm the files appeared
+
+HOW
+  Inside your lab (any subfolder is fine), touch one or more files.
+  Names are yours: notepad.txt, ideas.md, scrap.log — whatever fits.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    w3)
+      cat <<EOF
+STORY
+  Papers pile up. You rename one, tuck it into a stash, then clone
+  the whole stash so nothing precious is lost.
+
+GOAL
+  Practice renaming/moving and copying.
+
+COMMANDS TO USE
+  mv      → rename or move a file/folder
+  mkdir   → make a destination folder if needed
+  cp -r   → copy a folder and its contents
+
+HOW
+  Take a file you already made, rename it, move it into a new folder,
+  then copy that folder. Use your own filenames — the skill is mv/cp.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    w4)
+      cat <<EOF
+STORY
+  Cleanup day. Empty crates get removed politely. Full crates must
+  be cleared with care — there is no Trash can here.
+
+GOAL
+  Remove an empty directory, then delete a non-empty tree safely.
+
+COMMANDS TO USE
+  rmdir     → remove an empty folder
+  rm -r     → remove a folder and its contents
+  rm -ri    → same, but ask before each delete (safer practice)
+
+HOW
+  Make a throwaway empty folder and remove it with rmdir.
+  Then make a small nested mess (folder + file) and remove it with rm.
+  Be deliberate — rm does not forgive.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    boss2)
+      cat <<EOF
+STORY
+  The greenhouse needs seasons, seeds, renaming, transplanting,
+  and finally tearing down a failed summer wing.
+
+GOAL
+  Orchestrate mkdir, touch, mv, and rm in one mini project.
+
+COMMANDS TO USE
+  mkdir -p   → build seasonal folders
+  touch      → plant seed files
+  mv         → rename and transplant
+  rm -r      → remove a whole branch
+
+HOW
+  Invent a small garden layout under your lab. Create two seasons,
+  plant a few seed files, rename one, move some into winter, then
+  remove the summer side. Brace expansion {a,b} can help if you like.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    t1)
+      cat <<EOF
+STORY
+  A long scroll unrolls across the desk. You only need the first
+  lines and the last lines — not the whole epic every time.
+
+GOAL
+  Peek at the beginning and end of a text file.
+
+COMMANDS TO USE
+  head   → show the first lines
+  tail   → show the last lines
+  (optional helpers: seq, >, cat)
+
+HOW
+  Make or reuse a multi-line file in your lab. Read a few lines from
+  the top with head, then a few from the bottom with tail.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    t2)
+      cat <<EOF
+STORY
+  The camp journal grows day by day. Overwrite starts a new page;
+  append adds another entry without erasing yesterday.
+
+GOAL
+  Practice output redirection: write (>) and append (>>).
+
+COMMANDS TO USE
+  echo ... > file    → write/overwrite
+  echo ... >> file   → append
+  cat file           → read it back
+
+HOW
+  Create a log file, add several lines over time using > then >>,
+  and read the final story with cat.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    t3)
+      cat <<EOF
+STORY
+  Messy inventory slips arrive — duplicates everywhere. You sort
+  them, then count unique names like a careful quartermaster.
+
+GOAL
+  Pipe data through sort and uniq.
+
+COMMANDS TO USE
+  sort     → order lines
+  uniq     → collapse duplicates (usually after sort)
+  uniq -c  → count each unique line
+  |        → send one command's output into the next
+
+HOW
+  Make a small text list with repeats. Sort it, then uniq it
+  (optionally with counts). The pipe | is the bridge between them.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    t4)
+      cat <<EOF
+STORY
+  Seven day-markers appear at once — not by typing seven times,
+  but by speaking a pattern the shell expands for you.
+
+GOAL
+  Use brace expansion and a glob to create and list matching files.
+
+COMMANDS TO USE
+  touch day{1..7}.txt   → (pattern idea) create many names at once
+  ls day*.txt           → list names matching a glob
+
+HOW
+  From your lab, create a set of similarly named files with braces,
+  then list them with a wildcard. Watch spelling: .txt means .txt.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    boss3)
+      cat <<EOF
+STORY
+  The market ledger is chaotic. Rank items by how often they appear —
+  most common at the top — and save the ranking to a file.
+
+GOAL
+  Combine sort, uniq, pipes, and redirection into one report.
+
+COMMANDS TO USE
+  sort / uniq -c / sort -nr
+  > file     → save the final ranking
+  cat        → review it
+
+HOW
+  Start from a list with duplicates, build a counted ranking pipeline,
+  redirect the result into a new file, then read it.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    h1)
+      cat <<EOF
+STORY
+  A bloodhound is released into your lab woods. It only cares about
+  filenames that match a pattern — especially the .txt tracks.
+
+GOAL
+  Search for files by name pattern.
+
+COMMANDS TO USE
+  find <path> -name "pattern"   → walk folders and match names
+
+HOW
+  Point find at your lab and hunt for files ending in .txt
+  (or another pattern you choose). Notice how it searches recursively.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    h2)
+      cat <<EOF
+STORY
+  Tracks aren't only on filenames — sometimes the clue is a word
+  hidden inside a page. The hound sniffs text now.
+
+GOAL
+  Search inside file contents for a word.
+
+COMMANDS TO USE
+  grep        → find matching lines in a file
+  grep -n     → also show line numbers
+  (optional: echo/printf to create a sample file first)
+
+HOW
+  Make or reuse a text file that contains a memorable word, then
+  grep for that word. Try -n so you see where it was found.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    h3)
+      cat <<EOF
+STORY
+  Two almost-identical maps are pinned side by side. Spot the
+  difference before the expedition leaves.
+
+GOAL
+  Compare two files and see what changed.
+
+COMMANDS TO USE
+  diff fileA fileB   → show line differences
+
+HOW
+  Create two similar files (one with a small change), then run diff.
+  Read the markers carefully — they tell you what was added/removed.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    h4)
+      cat <<EOF
+STORY
+  Supply officers measure packs and warehouse space, then flip through
+  the expedition diary of commands you already typed.
+
+GOAL
+  Check disk usage and revisit command history.
+
+COMMANDS TO USE
+  du -h      → folder sizes (human readable)
+  df -h      → filesystem free space
+  history    → your recent commands
+
+HOW
+  From your lab, measure local usage with du, check broader space
+  with df, then peek at history (pipes like | head are welcome).
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    boss4)
+      cat <<EOF
+STORY
+  Zone 4's warden demands a hunt: find files by name, then search
+  their contents for a signal word.
+
+GOAL
+  Combine find and grep like a scout pair.
+
+COMMANDS TO USE
+  find   → locate files
+  grep   → search inside them ( -r / -i help for recursive/ignore case)
+
+HOW
+  Search your lab for interesting files, then search for a word
+  inside the lab tree. Either order is fine — both skills must show.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    e1)
+      cat <<EOF
+STORY
+  The machine city never sleeps. Processes walk the streets —
+  some yours, some the system's. Take a census.
+
+GOAL
+  List running processes.
+
+COMMANDS TO USE
+  ps          → simple process list
+  ps aux      → richer system-wide view
+  (optional: | head to preview)
+
+HOW
+  Run ps, then try a fuller listing. Read the columns: PID, CPU,
+  command name. You are just observing this time.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    e2)
+      cat <<EOF
+STORY
+  A sleepy courier starts a long wait in the background. You check
+  the job board, then politely dismiss the courier.
+
+GOAL
+  Start a background task and stop it with kill.
+
+COMMANDS TO USE
+  sleep N &   → run a wait in the background
+  jobs        → list your shell's jobs
+  kill %1     → signal job number 1 (or kill <PID>)
+
+HOW
+  Launch a short background sleep, confirm it with jobs, then kill it.
+  Soft stop first is the habit; force only when needed.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    e3)
+      cat <<EOF
+STORY
+  Couriers learn to wait in the wings. You practice parking a job
+  in the background and reading the jobs list.
+
+GOAL
+  Get comfortable with background jobs.
+
+COMMANDS TO USE
+  command &   → background a process
+  jobs        → see active jobs
+  (later tools: fg, bg — optional exploration)
+
+HOW
+  Start a background sleep (or similar), then inspect jobs.
+  Notice job numbers like [1] — those are handles for later control.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    boss5)
+      cat <<EOF
+STORY
+  Zone 5's arena: spawn a background contender, read the jobs
+  board, then end the bout cleanly.
+
+GOAL
+  Prove jobs + kill under pressure.
+
+COMMANDS TO USE
+  sleep ... &
+  jobs
+  kill %N   (or kill <PID>)
+
+HOW
+  Same ritual as before, but deliberate: start, inspect, stop,
+  then quest check.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    k1)
+      cat <<EOF
+STORY
+  Travelers pack a satchel before the mountain pass — many papers
+  crushed into one sealed bundle.
+
+GOAL
+  Create an archive (compressed tarball) of a folder.
+
+COMMANDS TO USE
+  tar -czf archive.tgz folder   → create a gzip-compressed archive
+  mkdir / echo / touch          → prepare something worth packing
+
+HOW
+  Make a small folder with a file or two in your lab, then pack it
+  into a .tgz/.tar.gz. Confirm the archive file appears with ls.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    k2)
+      cat <<EOF
+STORY
+  Not every message can be typed in one echo. Sometimes you need a
+  proper quill — a full-screen editor in the terminal.
+
+GOAL
+  Create/edit a text file with a terminal editor.
+
+COMMANDS TO USE
+  nano file     → simple editor
+  (save/exit in nano: Ctrl+O Enter, then Ctrl+X)
+  Alternatives like vim are fine if you already know them.
+
+HOW
+  Open an editor on a file under your lab, write a short note,
+  save, and exit. The point is editing, not the exact filename.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    k3)
+      cat <<EOF
+STORY
+  Veterans invent shortcuts. One alias saves typing; xargs turns a
+  list of names into real actions.
+
+GOAL
+  Try an alias and feed names into a command with xargs.
+
+COMMANDS TO USE
+  alias name='command'   → temporary shortcut in this shell
+  xargs                  → build commands from input lines
+  (helpers: printf/echo, cat, touch, ls)
+
+HOW
+  Make a handy alias (for example a short ls). Then create a tiny
+  list of filenames and use xargs to act on them (like touching each).
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    k4)
+      cat <<EOF
+STORY
+  Keys to the keep: a script must be allowed to run, and a shortcut
+  link should point to a secret without copying it.
+
+GOAL
+  Change permissions and create a symbolic link.
+
+COMMANDS TO USE
+  chmod u+x file   → make a file executable for you
+  ./file           → run a script in the current folder
+  ln -s target alias   → symbolic link
+
+HOW
+  Write a tiny script, chmod it so it can run, execute it, then
+  create a symlink that points at another file. Names are yours.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    boss6)
+      cat <<EOF
+STORY
+  Final gate. Pack your keep into one backup chest — proof you can
+  preserve work before the credits roll.
+
+GOAL
+  Create a backup archive of important lab work.
+
+COMMANDS TO USE
+  tar -czf backup.tgz <folder>   → compress a folder into one file
+
+HOW
+  From your lab, archive a folder that matters (for example keep/,
+  or another project folder you built). Name the archive with the word
+  backup so it is clearly a backup (example idea: keep-backup.tgz).
+  Your earlier docs.tgz from a previous level does not count here.
+
+WHEN DONE
+  quest check
+EOF
+      ;;
+    DONE)
+      cat <<EOF
+STORY
+  The terminal grows quiet. Paths you carved, files you touched,
+  processes you commanded — they all remember your name: $PLAYER_NAME.
+
+GOAL
+  None left. You are a Command Master.
+
+WHEN READY FOR ANOTHER RUN
+  quest reset
+EOF
+      ;;
+    *) echo "No lesson text for $1" ;;
+  esac
+}
+
+celebrate() {
+  local player="$1" lesson="$2" next_title="${3:-}"
+  echo
+  echo "****************************************"
+  echo "*                                      *"
+  echo "*   CONGRATULATIONS, ${player}!"
+  echo "*                                      *"
+  echo "*   *** PARTY TIME ***  BOOM! ***      *"
+  echo "*   Lesson cleared: ${lesson}"
+  echo "*                                      *"
+  echo "****************************************"
+  echo
+  if [[ -n "$next_title" ]]; then
+    echo "You unlocked: $next_title"
+    echo
+  fi
+}
+
+celebrate_master() {
+  local player="$1"
+  local total="${#ORDER[@]}"
+  echo
+  cat <<EOF
+################################################################
+#                                                              #
+#   ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★          #
+#                                                              #
+#          ★★★  COMMAND MASTER UNLOCKED  ★★★                  #
+#                                                              #
+#              Player: ${player}
+#                                                              #
+#     You cleared all ${total} levels. The terminal is yours.           #
+#                                                              #
+#   ✦  paths carved   ✦  files forged   ✦  processes tamed   #
+#                                                              #
+#   ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★  ★          #
+#                                                              #
+################################################################
+
+        +**************************************+
+        *     S U C C E S S   ★   C L E A R    *
+        *        ${total} / ${total}  COMPLETE             *
+        +**************************************+
+EOF
+  echo
+}
+
+ask_continue() {
+  # Returns 0 if user wants to continue
+  if [[ ! -t 0 ]]; then
+    # Non-interactive (automation): continue by default
+    return 0
+  fi
+  local ans
+  while true; do
+    printf "Do you want to continue to the next level? (y/n): "
+    IFS= read -r ans || ans="y"
+    case "$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')" in
+      y|yes|"") return 0 ;;
+      n|no) return 1 ;;
+      *) echo "Please type y or n." ;;
+    esac
+  done
+}
+
+verify() {
+  local q="$1"
+  case "$q" in
+    # Level 1 requires whoami + pwd + clear evidence.
+    # Ctrl+L often never appears in history, so players may need: quest log clear
+    s1) evidence 'whoami' && evidence 'pwd' && evidence 'clear' ;;
+    s2) evidence 'man ls' && evidence 'man man' ;;
+    # Nested folder practice. Recommended name is shore/alpha, but any nested
+    # path under the lab (depth >= 2) also counts — e.g. lab/inner, a/b.
+    s3)
+      [[ -d "$LAB/shore/alpha" ]] \
+        || find "$LAB" -mindepth 2 -type d 2>/dev/null | grep -q . \
+        || evidence 'mkdir -p .*/'
+      ;;
+    s4) evidence 'ls -la' || evidence 'ls -al' || evidence 'ls -l -a' ;;
+    boss1) (evidence 'ls -la' || evidence 'ls -al') && evidence 'whoami' && evidence 'pwd' ;;
+    # Deep nest (4+ levels). Recommended: workshop/a/b/c — custom names OK too.
+    w1)
+      [[ -d "$LAB/workshop/a/b/c" ]] \
+        || find "$LAB" -mindepth 4 -type d 2>/dev/null | grep -q .
+      ;;
+    # Skill is touch — any new file(s) under the lab (or evidence of touch) count.
+    # workshop/ is only a suggested sandbox, not required.
+    w2)
+      evidence '\btouch\b' \
+        || find "$LAB" -type f ! -path '*/.*' 2>/dev/null | grep -q .
+      ;;
+    # Skill is mv + cp — filenames can be whatever the player chose.
+    w3) evidence '\bmv\b' && evidence '\bcp\b' ;;
+    w4) evidence '\brm\b' || evidence 'rmdir' ;;
+    boss2) [[ -d "$LAB/greenhouse/winter" ]] || evidence 'greenhouse' ;;
+    t1) evidence '\bhead\b' && evidence '\btail\b' ;;
+    t2) [[ -f "$LAB/log.txt" ]] || evidence '>>' ;;
+    t3) evidence 'uniq' && evidence 'sort' ;;
+    t4) ls "$LAB"/day*.txt >/dev/null 2>&1 || evidence 'day\{1' ;;
+    boss3) evidence 'uniq' || [[ -f "$LAB/ranked.txt" ]] ;;
+    h1) evidence '\bfind\b' ;;
+    h2) evidence '\bgrep\b' ;;
+    h3) evidence '\bdiff\b' ;;
+    h4) evidence '\bdu\b' || evidence '\bhistory\b' ;;
+    boss4) evidence '\bfind\b' && evidence '\bgrep\b' ;;
+    e1) evidence '\bps\b' || evidence '\btop\b' ;;
+    e2) evidence '\bkill\b' ;;
+    e3) evidence '\bjobs\b' || evidence 'sleep' ;;
+    boss5) evidence '\bjobs\b' && evidence '\bkill\b' ;;
+    k1) evidence '\btar\b' || ls "$LAB"/*.tgz >/dev/null 2>&1 ;;
+    k2) evidence '\bnano\b' || [[ -f "$LAB/keep/readme.txt" ]] ;;
+    k3) evidence '\balias\b' || evidence 'xargs' ;;
+    k4) evidence 'chmod' || evidence 'ln -s' ;;
+    # Final boss needs a NEW backup archive (not the earlier docs.tgz from k1).
+    boss6)
+      find "$LAB" -maxdepth 2 \( -name '*backup*.tgz' -o -name '*backup*.tar.gz' \) 2>/dev/null | grep -q .
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+next_of() {
+  local cur="$1" i
+  for i in "${!ORDER[@]}"; do
+    if [[ "${ORDER[$i]}" == "$cur" ]]; then
+      local j=$((i+1))
+      (( j < ${#ORDER[@]} )) && { echo "${ORDER[$j]}"; return; }
+      echo DONE; return
+    fi
+  done
+  echo s1
+}
+
+ensure_logger_hint() {
+  if ! grep -q 'quest-mastery-hook' "$HOME/.bashrc" 2>/dev/null; then
+    cat >> "$HOME/.bashrc" <<'EOF'
+
+# quest-mastery-hook
+_quest_log_last_command() {
+  local cmd
+  cmd=$(history 1 2>/dev/null | sed 's/^ *[0-9]* *//')
+  [[ -n "$cmd" ]] || return 0
+  case "$cmd" in
+    quest*|\#*) return 0 ;;
+  esac
+  mkdir -p "$HOME/.quest-mastery"
+  # Prefer current player's log if logged in
+  if [[ -f "$HOME/.quest-mastery/current_user" ]]; then
+    slug=$(sed -n '2p' "$HOME/.quest-mastery/current_user")
+    logfile="$HOME/.quest-mastery/users/$slug/session.log"
+  else
+    logfile="$HOME/.quest-mastery/session.log"
+  fi
+  mkdir -p "$(dirname "$logfile")"
+  printf '%s\n' "$cmd" >> "$logfile"
+}
+PROMPT_COMMAND="_quest_log_last_command${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+EOF
+  fi
+  if [[ "${PROMPT_COMMAND:-}" != *_quest_log_last_command* ]]; then
+    echo "FIRST-TIME SETUP (important):"
+    echo "  Run once so quest can see your commands:"
+    echo "    source ~/.bashrc"
+    echo
+  fi
+}
+
+log_hints_for() {
+  case "$1" in
+    s1) echo "  quest log whoami"; echo "  quest log pwd"; echo "  quest log clear" ;;
+    s2) echo "  quest log man ls"; echo "  quest log man man" ;;
+    s4) echo "  quest log ls -la" ;;
+    boss1) echo "  quest log ls -la"; echo "  quest log whoami"; echo "  quest log pwd" ;;
+    *) echo "  quest log <command-you-ran>" ;;
+  esac
+}
+
+list_users() {
+  hr
+  echo "PLAYERS"
+  hr
+  if [[ -z "$(ls -A "$USERS_DIR" 2>/dev/null || true)" ]]; then
+    echo "(none yet)"
+    echo
+    echo "Start with: quest login YourName"
+    return
+  fi
+  python3 - <<PY
+import json, os
+root="$USERS_DIR"
+cur_file="$CURRENT_FILE"
+cur=None
+if os.path.isfile(cur_file):
+    lines=open(cur_file).read().splitlines()
+    cur=lines[1] if len(lines)>1 else None
+print(f"{'Active':<8}{'Name':<20}{'Quest':<10}{'Done':<8}{'Folder'}")
+for slug in sorted(os.listdir(root)):
+    d=os.path.join(root, slug)
+    prog=os.path.join(d, "progress.json")
+    if not os.path.isfile(prog):
+        continue
+    p=json.load(open(prog))
+    name=p.get("name", slug)
+    quest=p.get("quest", "?")
+    done=len(p.get("done", []))
+    mark="->" if slug==cur else ""
+    print(f"{mark:<8}{name:<20}{quest:<10}{done:<8}{d}")
+PY
+}
+
+show_status() {
+  local campaign active focus cnum anum
+  campaign="$(get_quest)"
+  active="$(active_lesson)"
+  focus="$(get_focus)"
+  cnum="$(level_number "$campaign")"
+  anum="$(level_number "$active")"
+  ensure_logger_hint
+  show_command_menu
+  hr
+  echo "LINUX COMMAND MASTERY"
+  hr
+  echo "Player:    $PLAYER_NAME"
+  echo "Cleared:   $(done_count)/${#ORDER[@]} levels"
+  if [[ "$campaign" == "DONE" ]]; then
+    echo "Campaign:  COMPLETE (all levels unlocked)"
+  else
+    echo "Campaign:  level $cnum/${#ORDER[@]} — $(title "$campaign")"
+  fi
+  if [[ -n "$focus" && "$focus" != "$campaign" ]]; then
+    echo "Viewing:   level $anum — $(title "$focus")  (jump; progress kept)"
+  fi
+  echo "Lab:       $LAB"
+  echo
+  echo "How to play:"
+  echo "  1) Read the STORY and GOAL"
+  echo "  2) Use the listed commands your own way"
+  echo "  3) Run:  quest check"
+  echo "  Jump to a level:    quest <N>   (example: quest 5)"
+  echo "  Level map:          quest levels"
+  echo
+  hr
+  echo "LESSON $anum: $(title "$active")"
+  hr
+  teach "$active"
+  hr
+  echo "Go to your lab first:"
+  echo "  cd $LAB"
+  hr
+}
+
+cmd_help() {
+  show_command_menu
+  cat <<EOF
+DETAILS
+
+  quest login YourName
+      Create or switch to a player. Progress is saved per name.
+
+  quest
+      Show your current campaign lesson (asks for name if needed).
+
+  quest <N>
+  quest go <N>
+      Jump to unlocked level N without undoing cleared progress.
+      Example: quest 5   or   quest 17
+      After clearing all 29, every level is unlocked.
+
+  quest levels
+      Show the full numbered level map.
+
+  quest check
+      Verify the lesson you are viewing and unlock the next one.
+      Replaying an old level does NOT erase later clears.
+
+  quest log <cmd>
+      Manually save evidence. Example: quest log whoami
+
+  quest who
+      Show who is logged in.
+
+  quest users
+      List all players and their progress.
+
+  quest logout
+      Log out current player (next quest will ask for a name).
+
+  quest reset
+      Reset ONLY the current player's progress.
+
+BEGINNER FLOW
+  1) cd ~/quest-lab
+  2) quest
+  3) enter your name (or: quest login YourName)
+  4) follow the lesson
+  5) quest check
+EOF
+}
+
+case "${1:-status}" in
+  login)
+    shift
+    show_command_menu
+    if [[ $# -lt 1 ]]; then
+      ask_login_interactive
+    else
+      login_user "$*"
+    fi
+    show_status
+    ;;
+  logout)
+    rm -f "$CURRENT_FILE"
+    show_command_menu
+    echo "Logged out."
+    echo "Next: cd ~/quest-lab"
+    echo "Then: quest login YourName"
+    ;;
+  who|whoami-player)
+    show_command_menu
+    if load_user; then
+      echo "Player: $PLAYER_NAME"
+      echo "Lab:    $LAB"
+      echo "Quest:  $(get_quest) — $(title "$(get_quest)")"
+      echo "Done:   $(done_count)/${#ORDER[@]}"
+    else
+      echo "No player logged in."
+      echo "Run: quest login YourName"
+    fi
+    ;;
+  users|players)
+    show_command_menu
+    list_users
+    ;;
+  status|"")
+    # Always show the command structure when entering quest
+    if ! load_user; then
+      show_command_menu
+    fi
+    require_user
+    show_status
+    ;;
+  hint|teach|lesson)
+    require_user
+    q="$(active_lesson)"
+    hr
+    echo "Player: $PLAYER_NAME"
+    echo "LESSON $(level_number "$q"): $(title "$q")"
+    hr
+    teach "$q"
+    hr
+    ;;
+  levels|map|list)
+    require_user
+    list_levels
+    ;;
+  go|jump)
+    require_user
+    shift
+    jump_to_level "${1:-}"
+    ;;
+  help|-h|--help)
+    cmd_help
+    ;;
+  log)
+    require_user
+    shift
+    echo "$*" >> "$LOG"
+    echo "Logged evidence for $PLAYER_NAME: $*"
+    echo "Now run: quest check"
+    ;;
+  check)
+    require_user
+    q="$(active_lesson)"
+    campaign="$(get_quest)"
+    echo "Player:  $PLAYER_NAME"
+    echo "Checking lesson $(level_number "$q"): $q — $(title "$q")"
+    echo
+
+    # Replay of an already-cleared level: never undo later progress.
+    if is_done "$q" && [[ "$q" != "$campaign" ]]; then
+      if verify "$q"; then
+        celebrate "$PLAYER_NAME" "$(title "$q") (replay)" ""
+        echo "Replay OK. Cleared progress unchanged: $(done_count)/${#ORDER[@]}"
+        clear_focus
+        if [[ "$campaign" == "DONE" ]]; then
+          echo "Campaign remains COMPLETE — all 29 levels are unlocked."
+          echo "Jump to any level with:  quest <N>   (example: quest 5)"
+          echo "See the map with:        quest levels"
+        else
+          echo "Returning you to campaign level $(level_number "$campaign") — $(title "$campaign")"
+          echo "Run: quest"
+        fi
+      else
+        echo "NOT YET — replay not verified for $PLAYER_NAME."
+        echo "Practice the skill, then: quest check"
+        echo "(Your later cleared levels are still safe.)"
+        echo
+        hr
+        teach "$q"
+        hr
+        exit 1
+      fi
+      exit 0
+    fi
+
+    if [[ "$campaign" == "DONE" ]]; then
+      celebrate_master "$PLAYER_NAME"
+      teach DONE
+      exit 0
+    fi
+
+    if verify "$q"; then
+      if [[ "$q" == "s1" ]]; then
+        echo "Detected: whoami, pwd, and clear. Great work."
+        echo
+      fi
+      # Zone 2 later lessons expect workshop/ — prepare it if player used custom names.
+      if [[ "$q" == "w1" ]]; then
+        if [[ ! -d "$LAB/workshop/a/b/c" ]]; then
+          mkdir -p "$LAB/workshop/a/b/c"
+          echo "Nice deep nest. Also prepared workshop/a/b/c for the next lessons."
+          echo
+        fi
+      fi
+      cleared_title="$(title "$q")"
+      mark_done "$q"
+      n="$(next_of "$q")"
+      set_quest "$n"
+      clear_focus
+
+      if [[ "$n" == DONE ]]; then
+        celebrate "$PLAYER_NAME" "$cleared_title" "Command Master complete"
+        celebrate_master "$PLAYER_NAME"
+        teach DONE
+      else
+        next_title="level $(level_number "$n") — $(title "$n")"
+        celebrate "$PLAYER_NAME" "$cleared_title" "$next_title"
+        if ask_continue; then
+          echo
+          echo "Great — continuing to the next level..."
+          echo
+          show_status
+        else
+          echo
+          echo "No problem, $PLAYER_NAME. Come back anytime."
+          echo "When ready:"
+          echo "  cd $LAB"
+          echo "  quest"
+          echo
+          echo "Your campaign continues at: $next_title"
+          echo "Or jump to any unlocked level:  quest <N>   (example: quest 5)"
+        fi
+      fi
+    else
+      echo "NOT YET — could not verify this lesson for $PLAYER_NAME."
+      echo
+      if [[ "$q" == "s1" ]]; then
+        echo "Level 1 checklist:"
+        if evidence 'whoami'; then echo "  [x] whoami"; else echo "  [ ] whoami   → run: whoami"; fi
+        if evidence 'pwd'; then echo "  [x] pwd"; else echo "  [ ] pwd      → run: pwd"; fi
+        if evidence 'clear'; then
+          echo "  [x] clear"
+        else
+          echo "  [ ] clear"
+          echo
+          hr
+          echo "WHY clear / Ctrl+L WAS NOT TRACKED"
+          hr
+          echo "Ctrl+L is a keyboard shortcut, not a typed command."
+          echo "Most terminals do NOT save Ctrl+L into command history,"
+          echo "so quest cannot see that you pressed it."
+          echo
+          echo "WHAT TO DO NOW (use this exact command):"
+          echo "  clear"
+          echo "  quest log clear"
+          echo
+          echo "Then run:"
+          echo "  quest check"
+          hr
+        fi
+        echo
+        echo "If anything is still missing, paste this block:"
+        echo "  quest log whoami"
+        echo "  quest log pwd"
+        echo "  quest log clear"
+        echo "  quest check"
+      elif [[ "$q" == "s3" ]]; then
+        echo "Level 3 checklist:"
+        if [[ -d "$LAB/shore/alpha" ]] || find "$LAB" -mindepth 2 -type d 2>/dev/null | grep -q .; then
+          echo "  [x] nested folder found under $LAB"
+        else
+          echo "  [ ] need a NESTED folder under $LAB"
+          echo
+          hr
+          echo "WHY IT FAILED"
+          hr
+          echo "Your commands were valid Linux — nothing is 'wrong' with that."
+          echo "This level checks one specific skill: nested folders."
+          echo
+          if [[ -d "$LAB/lab" ]]; then
+            echo "You made:  $LAB/lab     (one folder)"
+            echo "Need also: $LAB/lab/inner  (or shore/alpha)"
+            echo
+            echo "Finish it your way:"
+            echo "  cd $LAB"
+            echo "  mkdir -p lab/inner"
+            echo "  cd lab/inner"
+            echo "  pwd"
+            echo "  cd $LAB"
+            echo "  quest check"
+          else
+            echo "Create any nested path, for example:"
+            echo "  cd $LAB"
+            echo "  mkdir -p shore/alpha"
+            echo "  quest check"
+          fi
+          hr
+        fi
+      elif [[ "$q" == "w1" ]]; then
+        echo "Level checklist:"
+        if [[ -d "$LAB/workshop/a/b/c" ]] || find "$LAB" -mindepth 4 -type d 2>/dev/null | grep -q .; then
+          echo "  [x] deep nested folder found"
+        else
+          echo "  [ ] need a deep nest (4+ folders), e.g. workshop/a/b/c"
+          echo
+          echo "Your own names are fine. Example:"
+          echo "  mkdir -p lab1/office/desk/computer"
+          echo "  quest check"
+        fi
+      elif [[ "$q" == "w2" ]]; then
+        echo "Level checklist (skill = touch):"
+        if evidence '\btouch\b' || find "$LAB" -type f ! -path '*/.*' 2>/dev/null | grep -q .; then
+          echo "  [x] touch / files detected"
+        else
+          echo "  [ ] create at least one file with touch"
+          echo
+          echo "Any names/folders under your lab work. Example:"
+          echo "  cd $LAB/lab1"
+          echo "  touch notepad.txt"
+          echo "  quest check"
+        fi
+      else
+        echo "Try:"
+        echo "  source ~/.bashrc"
+        log_hints_for "$q"
+        echo "  quest check"
+      fi
+      echo
+      hr
+      teach "$q"
+      hr
+      exit 1
+    fi
+    ;;
+  reset)
+    require_user
+    printf '%s\n' '{"quest":"s1","done":[],"boss":[],"name":"'"$PLAYER_NAME"'"}' > "$PROG"
+    : > "$LOG"
+    # Wipe lab contents without deleting the directory inode (avoids getcwd errors
+    # in shells that are already cd'd into the lab).
+    mkdir -p "$LAB"
+    find "$LAB" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+    heal_cwd "$LAB"
+    echo "Progress reset for player: $PLAYER_NAME"
+    echo "Lab wiped. Stay here or run: cd $LAB"
+    echo
+    show_status
+    ;;
+  *)
+    if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+      require_user
+      jump_to_level "$1"
+    else
+      echo "Unknown command: $1"
+      echo
+      cmd_help
+      exit 1
+    fi
+    ;;
+esac
